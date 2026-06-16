@@ -1237,6 +1237,30 @@ function gameLoop() {
     drawMenu();
     if (Input.justPressed('Digit1') || Input.justPressed('Numpad1')) Game.startPvP();
     if (Input.justPressed('Digit2') || Input.justPressed('Numpad2')) Game.startPvE();
+    if (Input.justPressed('Digit3') || Input.justPressed('Numpad3')) {
+      if (Online.socket) { Online.lobbyMode = 'select'; Online.errorMsg = ''; Online.statusMsg = ''; state = State.ONLINE_LOBBY; }
+    }
+    Input.flush();
+  } else if (state === State.ONLINE_LOBBY) {
+    drawLobby();
+    if (Online.lobbyMode === 'select') {
+      if (Input.justPressed('KeyC')) { Online.createRoom(); }
+      if (Input.justPressed('KeyJ')) { Online.lobbyMode = 'join'; Online.joinInput = ''; Online.errorMsg = ''; Online.statusMsg = ''; }
+      if (Input.justPressed('Escape')) { Online.reset(); state = State.MENU; }
+    } else if (Online.lobbyMode === 'create') {
+      if (Input.justPressed('Escape')) { Online.reset(); state = State.MENU; }
+    } else if (Online.lobbyMode === 'join') {
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').forEach(ch => {
+        if (Input.justPressed('Key' + ch) && Online.joinInput.length < 6) Online.joinInput += ch;
+      });
+      '0123456789'.split('').forEach(digit => {
+        if ((Input.justPressed('Digit' + digit) || Input.justPressed('Numpad' + digit)) && Online.joinInput.length < 6)
+          Online.joinInput += digit;
+      });
+      if (Input.justPressed('Backspace')) Online.joinInput = Online.joinInput.slice(0, -1);
+      if (Input.justPressed('Enter') && Online.joinInput.length > 0) Online.joinRoom(Online.joinInput);
+      if (Input.justPressed('Escape')) { Online.lobbyMode = 'select'; Online.joinInput = ''; Online.errorMsg = ''; }
+    }
     Input.flush();
   } else if (state === State.UPGRADE) {
     // 繪製上一幀遊戲畫面作為背景
@@ -1310,4 +1334,5 @@ function gameLoop() {
 
 // ─── 啟動 ─────────────────────────────────────────────────────────────────────
 Input.init();
+Online.init();
 gameLoop();
