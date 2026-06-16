@@ -34,12 +34,15 @@ const State = {
 
 // ─── 升級池 ──────────────────────────────────────────────────────────────────
 const UPGRADE_POOL = [
-  { id: 'maxhp',     name: '裝甲強化', desc: '最大血量 +1，立即回血', color: '#22c55e' },
-  { id: 'speed',     name: '引擎升級', desc: '移動速度永久 +0.7',     color: '#facc15' },
-  { id: 'firerate',  name: '快速射擊', desc: '射擊冷卻縮短 5 幀',     color: '#f97316' },
-  { id: 'pierce',    name: '穿甲砲彈', desc: '每波多 4 發穿牆子彈',   color: '#a78bfa' },
-  { id: 'basehp',    name: '基地修復', desc: '基地回復 1 HP',         color: '#fbbf24' },
-  { id: 'multishot', name: '散彈射擊', desc: '射擊時同時發左右各一顆', color: '#60a5fa' },
+  { id: 'maxhp',     name: '裝甲強化', desc: '最大血量 +1，立即回血',    color: '#22c55e' },
+  { id: 'speed',     name: '引擎升級', desc: '移動速度永久 +0.7',        color: '#facc15' },
+  { id: 'firerate',  name: '快速射擊', desc: '射擊冷卻縮短 5 幀',        color: '#f97316' },
+  { id: 'pierce',    name: '穿甲砲彈', desc: '每波多 4 發穿牆子彈',      color: '#a78bfa' },
+  { id: 'basehp',    name: '基地修復', desc: '基地回復 1 HP',            color: '#fbbf24' },
+  { id: 'multishot', name: '散彈射擊', desc: '左右各加一顆子彈',          color: '#60a5fa' },
+  { id: 'autoheal',  name: '自動修復', desc: '每 8 秒自動回復 1 HP',     color: '#34d399' },
+  { id: 'trishot',   name: '三連砲',   desc: '前方並排發出三顆子彈',      color: '#f472b6' },
+  { id: 'haste',     name: '超速引擎', desc: '速度 +1.5，射速大幅提升',   color: '#38bdf8' },
 ];
 let state = State.MENU;
 let winner = '';
@@ -451,11 +454,12 @@ const Online = {
 };
 
 // ─── 坦克 ────────────────────────────────────────────────────────────────────
-function createTank(x, y, dir, team, isAI) {
+function createTank(x, y, dir, team, isAI, type = 'normal') {
   return {
     x, y, dir,
     team,   // 'p1' | 'p2' | 'ai'
     isAI,
+    type,   // 'normal' | 'scout' | 'heavy' | 'boss'
     alive: true,
     hp: 5, maxHp: 5,
     speed: 3,
@@ -464,10 +468,13 @@ function createTank(x, y, dir, team, isAI) {
     speedBoost: 0,
     pierceAmmo: 0,
     multishot: false,
+    trishot: false,
+    autoHealTimer: 0,
     // AI 狀態
     aiTimer: 0,
     aiDir: dir,
     aiFireTimer: 0,
+    _fireCdBase: 50,
     stuckTimer: 0,
     lastX: x, lastY: y,
   };
@@ -476,6 +483,9 @@ function createTank(x, y, dir, team, isAI) {
 function tankColor(tank) {
   if (tank.team === 'p1') return { body: '#1d4ed8', glow: '#3b82f6', barrel: '#60a5fa' };
   if (tank.team === 'p2') return { body: '#991b1b', glow: '#ef4444', barrel: '#fca5a5' };
+  if (tank.type === 'scout') return { body: '#713f12', glow: '#eab308', barrel: '#fef08a' };
+  if (tank.type === 'heavy') return { body: '#1c1917', glow: '#dc2626', barrel: '#fca5a5' };
+  if (tank.type === 'boss')  return { body: '#4c1d95', glow: '#a855f7', barrel: '#e879f9' };
   return { body: '#78350f', glow: '#f97316', barrel: '#fdba74' };
 }
 
@@ -491,6 +501,19 @@ function drawTank(tank) {
   ctx.save();
   ctx.translate(cx, cy);
   ctx.rotate(angle);
+
+  // Boss 光環（外圈紫色脈衝）
+  if (tank.type === 'boss') {
+    ctx.save();
+    ctx.shadowBlur = 30;
+    ctx.shadowColor = '#a855f7';
+    ctx.strokeStyle = `rgba(168,85,247,${0.4 + 0.4 * Math.sin(Date.now() * 0.008)})`;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(0, 0, 24, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
 
   // 護盾光環
   if (tank.shield > 0) {
@@ -556,6 +579,13 @@ function fireTank(tank, fromNetwork = false) {
     Bullets.spawn(bx, by, leftDir,  owner, false);
     Bullets.spawn(bx, by, rightDir, owner, false);
   }
+  // 三連砲：前方並排三顆
+  if (tank.trishot) {
+    const lOff = (tank.dir + 3) % 4;
+    const rOff = (tank.dir + 1) % 4;
+    Bullets.spawn(bx + DX[lOff] * 8, by + DY[lOff] * 8, tank.dir, owner, pierce);
+    Bullets.spawn(bx + DX[rOff] * 8, by + DY[rOff] * 8, tank.dir, owner, pierce);
+  }
   tank.fireCd = tank.fireCdBase;
 
   // 線上模式：廣播子彈給對方
@@ -572,6 +602,14 @@ function tickTank(tank) {
   if (tank.fireCd > 0) tank.fireCd--;
   if (tank.shield > 0) tank.shield--;
   if (tank.speedBoost > 0) tank.speedBoost--;
+  if (tank.autoHealTimer > 0) {
+    tank.autoHealTimer--;
+    if (tank.autoHealTimer === 0 && tank.hp < tank.maxHp) {
+      tank.hp++;
+      Particles.spawn(tank.x, tank.y, '#34d399', 10);
+      tank.autoHealTimer = 480; // 重置 8 秒
+    }
+  }
 }
 
 function hitTank(tank) {
@@ -582,6 +620,11 @@ function hitTank(tank) {
   if (tank.hp <= 0) {
     tank.alive = false;
     Particles.spawn(tank.x, tank.y, tankColor(tank).glow, 30);
+    // PvE 擊殺加分
+    if (state === State.PVE && tank.isAI) {
+      const pts = tank.type === 'boss' ? 500 : tank.type === 'heavy' ? 150 : tank.type === 'scout' ? 80 : 100;
+      Game.score += pts;
+    }
   }
 }
 
@@ -608,19 +651,33 @@ function bfsDir(fromR, fromC, toR, toC) {
   return Math.floor(Math.random() * 4);
 }
 
-function updateAI(ai, target) {
+function updateAI(ai, baseTarget) {
   if (!ai.alive) return;
   ai.aiTimer++;
   ai.aiFireTimer++;
   ai.stuckTimer++;
 
-  // 每 60 幀重新尋路
-  if (ai.aiTimer >= 60) {
+  // 依類型決定尋路間隔
+  const repathInterval = ai.type === 'scout' ? 25 : ai.type === 'boss' ? 20 : ai.type === 'heavy' ? 80 : 60;
+  const fireInterval   = ai._fireCdBase || 50;
+
+  // 決定移動目標：Boss 和偵察型優先追玩家
+  const p1 = Game.tanks.find(t => t.team === 'p1' && t.alive);
+  let moveTarget = baseTarget;
+  if (p1) {
+    const dist = Math.hypot(ai.x - p1.x, ai.y - p1.y);
+    if (ai.type === 'boss')  moveTarget = p1;
+    else if (ai.type === 'scout' && dist < 320) moveTarget = p1;
+    else if (Math.random() < 0.25) moveTarget = p1; // 普通/重裝 25% 機率追玩家
+  }
+
+  // 重新尋路
+  if (ai.aiTimer >= repathInterval) {
     ai.aiTimer = 0;
     const fr = Math.round(ai.y / TILE);
     const fc = Math.round(ai.x / TILE);
-    const tr = Math.round(target.y / TILE);
-    const tc = Math.round(target.x / TILE);
+    const tr = Math.round(moveTarget.y / TILE);
+    const tc = Math.round(moveTarget.x / TILE);
     ai.aiDir = bfsDir(fr, fc, tr, tc);
   }
 
@@ -635,19 +692,27 @@ function updateAI(ai, target) {
 
   moveTank(ai, ai.aiDir);
 
-  // 瞄準玩家方向射擊
-  if (ai.aiFireTimer >= 50) {
+  // 射擊邏輯
+  if (ai.aiFireTimer >= fireInterval) {
     ai.aiFireTimer = 0;
-    const dx = target.x - ai.x;
-    const dy = target.y - ai.y;
+    const fireAt = p1 || baseTarget;
+    const dx = fireAt.x - ai.x;
+    const dy = fireAt.y - ai.y;
     let fireDir = ai.dir;
-    if (Math.abs(dx) > Math.abs(dy)) {
-      fireDir = dx > 0 ? DIR.RIGHT : DIR.LEFT;
-    } else {
-      fireDir = dy > 0 ? DIR.DOWN : DIR.UP;
-    }
+    if (Math.abs(dx) > Math.abs(dy)) fireDir = dx > 0 ? DIR.RIGHT : DIR.LEFT;
+    else                             fireDir = dy > 0 ? DIR.DOWN  : DIR.UP;
     ai.dir = fireDir;
-    fireTank(ai);
+
+    if (ai.type === 'boss') {
+      // Boss 發射三連扇形子彈
+      const bx = ai.x + DX[ai.dir] * 18;
+      const by = ai.y + DY[ai.dir] * 18;
+      Bullets.spawn(bx, by, ai.dir,              'p2', false);
+      Bullets.spawn(bx, by, (ai.dir + 1) % 4,   'p2', false);
+      Bullets.spawn(bx, by, (ai.dir + 3) % 4,   'p2', false);
+    } else {
+      fireTank(ai);
+    }
   }
 }
 
@@ -673,9 +738,11 @@ const Game = {
   tanks: [],
   wave: 0,
   waveTimer: 0,
-  baseHp: 3,
-  baseMaxHp: 3,
+  baseHp: 5,
+  baseMaxHp: 5,
   score: 0,
+  waveAnnounce: 0,
+  totalAIThisWave: 0,
 
   startPvP() {
     state = State.PVP;
@@ -718,27 +785,77 @@ const Game = {
     this.waveTimer = 0;
     this.baseHp = this.baseMaxHp;
     this.score = 0;
+    this.waveAnnounce = 0;
+    this.totalAIThisWave = 0;
     this.spawnWave();
   },
 
   spawnWave() {
     this.wave++;
-    const count = Math.min(this.wave, 3);
-    const spd   = Math.min(2 + this.wave * 0.3, 5);
-    const aiHp  = this.wave <= 2 ? 2 : this.wave <= 4 ? 3 : 4;
-    const aiCd  = Math.max(50 - this.wave * 3, 28);
-    const positions = [
+    this.waveAnnounce = 150; // 顯示波次動畫 2.5 秒
+
+    const isBoss = this.wave % 5 === 0;
+    const spawnPositions = [
       [2, 2], [2, COLS-3], [2, Math.floor(COLS/2)],
+      [2, 6], [2, COLS-7], [2, Math.floor(COLS/3)],
     ];
-    for (let i = 0; i < count; i++) {
-      const [r, c] = positions[i];
-      const ai = createTank(c * TILE, r * TILE, DIR.DOWN, 'ai', true);
-      ai.hp = aiHp; ai.maxHp = aiHp;
-      ai.speed = spd;
-      ai.aiFireTimer = i * 20; // 錯開射擊時機
-      this.tanks.push(ai);
-      // 重設 AI 固定射擊間隔
-      ai._fireCdBase = aiCd;
+
+    if (isBoss) {
+      // ── Boss 波：1 Boss + 2 普通小兵 ──
+      const boss = createTank(Math.floor(COLS/2) * TILE, 2 * TILE, DIR.DOWN, 'ai', true, 'boss');
+      boss.hp = boss.maxHp = 8 + this.wave;
+      boss.speed = 2.5;
+      boss._fireCdBase = 55;
+      boss.aiFireTimer = 0;
+      this.tanks.push(boss);
+
+      [[2, 2], [2, COLS-3]].forEach((pos, i) => {
+        const m = createTank(pos[1] * TILE, pos[0] * TILE, DIR.DOWN, 'ai', true, 'normal');
+        m.hp = m.maxHp = 3;
+        m.speed = 3;
+        m._fireCdBase = 40;
+        m.aiFireTimer = (i + 1) * 25;
+        this.tanks.push(m);
+      });
+      this.totalAIThisWave = 3;
+
+    } else {
+      // ── 一般波次 ──
+      const count = Math.min(2 + Math.floor(this.wave / 2), 6);
+      for (let i = 0; i < count; i++) {
+        const [r, c] = spawnPositions[i % spawnPositions.length];
+
+        // 決定敵人類型
+        let type = 'normal';
+        if (this.wave >= 3) {
+          const roll = Math.random();
+          if (roll < 0.25)                          type = 'scout';
+          else if (roll < 0.45 && this.wave >= 5)   type = 'heavy';
+        }
+
+        let hp, spd, fireCd;
+        if (type === 'scout') {
+          hp = 1;
+          spd = Math.min(5.5 + this.wave * 0.1, 8);
+          fireCd = Math.max(28 - this.wave, 15);
+        } else if (type === 'heavy') {
+          hp = Math.min(4 + Math.floor(this.wave / 2), 10);
+          spd = 1.5;
+          fireCd = 80;
+        } else {
+          hp = this.wave <= 2 ? 2 : this.wave <= 4 ? 3 : Math.min(3 + Math.floor(this.wave / 3), 6);
+          spd = Math.min(2 + this.wave * 0.3, 5.5);
+          fireCd = Math.max(50 - this.wave * 2, 25);
+        }
+
+        const ai = createTank(c * TILE, r * TILE, DIR.DOWN, 'ai', true, type);
+        ai.hp = ai.maxHp = hp;
+        ai.speed = spd;
+        ai._fireCdBase = fireCd;
+        ai.aiFireTimer = i * 18;
+        this.tanks.push(ai);
+      }
+      this.totalAIThisWave = count;
     }
   },
 
@@ -762,6 +879,9 @@ const Game = {
     if (id === 'pierce')    { p1.pierceAmmo += 4; }
     if (id === 'basehp')    { this.baseHp = Math.min(this.baseMaxHp, this.baseHp + 1); }
     if (id === 'multishot') { p1.multishot = true; }
+    if (id === 'autoheal')  { p1.autoHealTimer = 480; }
+    if (id === 'trishot')   { p1.trishot = true; }
+    if (id === 'haste')     { p1.speed += 1.5; p1.fireCdBase = Math.max(10, p1.fireCdBase - 8); }
   },
 
   baseHit() {
@@ -831,7 +951,7 @@ const Game = {
         this.waveTimer++;
         if (this.waveTimer > 90) {
           this.waveTimer = 0;
-          this.score += this.wave * 100;
+          this.score += this.wave * 50; // 波次清除獎勵
           this.pickUpgrades();
           state = State.UPGRADE;
         }
@@ -917,9 +1037,12 @@ const Game = {
       }
       // 道具狀態
       let px = 36 + p1.maxHp * 16 + 8;
-      if (p1.shield > 0)     { ctx.font = '11px serif'; ctx.fillText('🛡️', px, 16); px += 18; }
-      if (p1.speedBoost > 0) { ctx.fillText('⚡', px, 16); px += 18; }
-      if (p1.pierceAmmo > 0) { ctx.fillText('💥', px, 16); }
+      ctx.font = '11px serif';
+      if (p1.shield > 0)       { ctx.fillText('🛡️', px, 16); px += 20; }
+      if (p1.speedBoost > 0)   { ctx.fillText('⚡', px, 16); px += 18; }
+      if (p1.pierceAmmo > 0)   { ctx.fillText('💥', px, 16); px += 18; }
+      if (p1.trishot)          { ctx.fillText('🌸', px, 16); px += 18; }
+      if (p1.autoHealTimer > 0){ ctx.fillText('💚', px, 16); }
     }
 
     // 中間資訊
@@ -940,6 +1063,12 @@ const Game = {
         ctx.fillRect(W/2 - (this.baseMaxHp * 14)/2 + i * 14, 32, 12, 4);
         ctx.restore();
       }
+      // 右側：剩餘敵人
+      const aiLeft = this.aiTanks().filter(t => t.alive).length;
+      ctx.fillStyle = aiLeft > 0 ? '#ef4444' : '#22c55e';
+      ctx.font = 'bold 12px Courier New';
+      ctx.textAlign = 'right';
+      ctx.fillText(`敵軍 ${aiLeft}/${this.totalAIThisWave}`, W - 12, 22);
     } else {
       ctx.fillStyle = '#f59e0b';
       ctx.font = 'bold 14px Courier New';
@@ -964,6 +1093,34 @@ const Game = {
     }
   },
 };
+
+// ─── 波次動畫 ─────────────────────────────────────────────────────────────────
+function drawWaveAnnounce() {
+  if (Game.waveAnnounce <= 0) return;
+  const alpha = Math.min(1, Game.waveAnnounce / 30);
+  const isBoss = Game.wave % 5 === 0;
+  const centerY = H / 2 + HUD_H;
+
+  ctx.save();
+  ctx.globalAlpha = alpha * 0.8;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, centerY - 50, W, 100);
+  ctx.globalAlpha = alpha;
+
+  ctx.shadowBlur  = 40;
+  ctx.shadowColor = isBoss ? '#a855f7' : '#fbbf24';
+  ctx.fillStyle   = isBoss ? '#e879f9' : '#fef08a';
+  ctx.font = `bold ${isBoss ? 40 : 34}px Courier New`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(
+    isBoss ? `⚠  BOSS  WAVE  ${Game.wave}  ⚠` : `WAVE  ${Game.wave}`,
+    W / 2, centerY
+  );
+  ctx.restore();
+
+  Game.waveAnnounce--;
+}
 
 // ─── 主選單 ───────────────────────────────────────────────────────────────────
 function drawMenu() {
@@ -1324,6 +1481,7 @@ function gameLoop() {
     Game.tanks.forEach(drawTank);
     Bullets.draw();
     Game.drawHUD();
+    if (state === State.PVE) drawWaveAnnounce();
 
     // ESC 返回選單
     if (Input.justPressed('Escape')) { state = State.MENU; Input.flush(); }
